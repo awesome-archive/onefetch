@@ -11,9 +11,13 @@ pub enum Error {
     /// Not in a Git Repo
     NotGitRepo,
     /// Error while getting branch info
+    BareGitRepo,
+    /// Repository is a bare git repo
     ReferenceInfoError,
     /// Image probably doesn't exist or has wrong format
     ImageLoadError,
+    /// Could not initialize the license detector
+    LicenseDetectorError,
 }
 
 impl std::fmt::Debug for Error {
@@ -23,9 +27,11 @@ impl std::fmt::Debug for Error {
             Error::GitNotInstalled => "Git failed to execute",
             Error::NoGitData => "Could not retrieve git configuration data",
             Error::ReadDirectory => "Could not read directory",
-            Error::NotGitRepo => "This is not a Git Repo",
+            Error::NotGitRepo => "Could not find a valid git repo on the current path",
+            Error::BareGitRepo => "Unable to run onefetch on bare git repos",
             Error::ReferenceInfoError => "Error while retrieving reference information",
             Error::ImageLoadError => "Could not load the specified image",
+            Error::LicenseDetectorError => "Could not initialize the license detector",
         };
         write!(f, "{}", content)
     }

@@ -3,14 +3,14 @@ use std::fmt::Write;
 use std::fs;
 use std::process::Command;
 
-use colored::{Color, Colorize, ColoredString};
+use colored::{Color, ColoredString, Colorize};
 use git2::Repository;
-use license;
 use image::DynamicImage;
+use license::Detector;
 
+use crate::image_backends::ImageBackend;
 use crate::language::Language;
 use crate::{AsciiArt, CommitInfo, Configuration, Error, InfoFieldOn};
-use crate::image_backends;
 
 type Result<T> = std::result::Result<T, crate::Error>;
 
@@ -27,6 +27,7 @@ pub struct Info {
     last_change: String,
     repo: String,
     commits: String,
+    pending: String,
     repo_size: String,
     number_of_lines: usize,
     license: String,
@@ -34,7 +35,9 @@ pub struct Info {
     custom_colors: Vec<String>,
     disable_fields: InfoFieldOn,
     bold_enabled: bool,
+    no_color_blocks: bool,
     custom_image: Option<DynamicImage>,
+    image_backend: Option<Box<dyn ImageBackend>>
 }
 
 impl std::fmt::Display for Info {
@@ -44,32 +47,68 @@ impl std::fmt::Display for Info {
             Some(&c) => c,
             None => Color::White,
         };
-        if !self.disable_fields.git_info{
+        if !self.disable_fields.git_info {
             let git_info_length;
             if self.git_username != "" {
                 git_info_length = self.git_username.len() + self.git_version.len() + 3;
-                write!(&mut buf, "{}{}", &self.get_formatted_info_label(&self.git_username, color), " ~ ")?;
+                write!(
+                    &mut buf,
+                    "{} ~ ",
+                    &self.get_formatted_info_label(&self.git_username, color)
+                )?;
             } else {
                 git_info_length = self.git_version.len();
             }
-            write_buf(&mut buf, &self.get_formatted_info_label(&self.git_version, color), "")?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label(&self.git_version, color),
+                "",
+            )?;
             let separator = "-".repeat(git_info_length);
-            write_buf(&mut buf, &self.get_formatted_info_label("", color), &separator)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("", color),
+                &separator,
+            )?;
         }
         if !self.disable_fields.project {
-            write_buf(&mut buf, &self.get_formatted_info_label("Project: ", color), &self.project_name)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Project: ", color),
+                &self.project_name,
+            )?;
         }
 
         if !self.disable_fields.head {
-            write_buf(&mut buf, &self.get_formatted_info_label("HEAD: ", color), &self.current_commit)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("HEAD: ", color),
+                &self.current_commit,
+            )?;
+        }
+
+        if !self.disable_fields.pending && self.pending != "" {
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Pending: ", color),
+                &self.pending,
+            )?;
         }
 
         if !self.disable_fields.version {
-            write_buf(&mut buf, &self.get_formatted_info_label("Version: ", color), &self.version)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Version: ", color),
+                &self.version,
+            )?;
         }
 
         if !self.disable_fields.created {
-            write_buf(&mut buf, &self.get_formatted_info_label("Created: ", color), &self.creation_date)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Created: ", color),
+                &self.creation_date,
+            )?;
         }
 
         if !self.disable_fields.languages && !self.languages.is_empty() {
@@ -88,9 +127,9 @@ impl std::fmt::Display for Info {
                         iter.collect()
                     }
                 };
-                
+
                 for (cnt, language) in languages.iter().enumerate() {
-                    let formatted_number = format!("{:.*}", 2, language.1);
+                    let formatted_number = format!("{:.*}", 1, language.1);
                     if cnt != 0 && cnt % 3 == 0 {
                         s = s + &format!("\n{}{} ({} %) ", pad, language.0, formatted_number);
                     } else {
@@ -99,7 +138,11 @@ impl std::fmt::Display for Info {
                 }
                 writeln!(buf, "{}{}", &self.get_formatted_info_label(title, color), s)?;
             } else {
-                write_buf(&mut buf, &self.get_formatted_info_label("Language: ", color), &self.dominant_language)?;
+                write_buf(
+                    &mut buf,
+                    &self.get_formatted_info_label("Language: ", color),
+                    &self.dominant_language,
+                )?;
             };
         }
 
@@ -122,7 +165,6 @@ impl std::fmt::Display for Info {
             let title = " ".repeat(title.len());
 
             for author in self.authors.iter().skip(1) {
-
                 writeln!(
                     buf,
                     "{}{}% {} {}",
@@ -135,56 +177,89 @@ impl std::fmt::Display for Info {
         }
 
         if !self.disable_fields.last_change {
-            write_buf(&mut buf, &self.get_formatted_info_label("Last change: ", color), &self.last_change)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Last change: ", color),
+                &self.last_change,
+            )?;
         }
 
         if !self.disable_fields.repo {
-            write_buf(&mut buf, &self.get_formatted_info_label("Repo: ", color), &self.repo)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Repo: ", color),
+                &self.repo,
+            )?;
         }
 
         if !self.disable_fields.commits {
-            write_buf(&mut buf, &self.get_formatted_info_label("Commits: ", color), &self.commits)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Commits: ", color),
+                &self.commits,
+            )?;
         }
 
         if !self.disable_fields.lines_of_code {
-            write_buf(&mut buf, &self.get_formatted_info_label("Lines of code: ", color), &self.number_of_lines)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Lines of code: ", color),
+                &self.number_of_lines,
+            )?;
         }
 
         if !self.disable_fields.size {
-            write_buf(&mut buf, &self.get_formatted_info_label("Size: ", color), &self.repo_size)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("Size: ", color),
+                &self.repo_size,
+            )?;
         }
 
         if !self.disable_fields.license {
-            write_buf(&mut buf, &self.get_formatted_info_label("License: ", color), &self.license)?;
+            write_buf(
+                &mut buf,
+                &self.get_formatted_info_label("License: ", color),
+                &self.license,
+            )?;
         }
 
-        writeln!(
-            buf,
-            "\n{0}{1}{2}{3}{4}{5}{6}{7}\n{8}{9}{10}{11}{12}{13}{14}{15}",
-            "   ".on_black(),
-            "   ".on_red(),
-            "   ".on_green(),
-            "   ".on_yellow(),
-            "   ".on_blue(),
-            "   ".on_magenta(),
-            "   ".on_cyan(),
-            "   ".on_white(),
-            "   ".on_bright_black(),
-            "   ".on_bright_red(),
-            "   ".on_bright_green(),
-            "   ".on_bright_yellow(),
-            "   ".on_bright_blue(),
-            "   ".on_bright_magenta(),
-            "   ".on_bright_cyan(),
-            "   ".on_bright_white(),
-        )?;
+        if !self.no_color_blocks {
+            writeln!(
+                buf,
+                "\n{0}{1}{2}{3}{4}{5}{6}{7}\n{8}{9}{10}{11}{12}{13}{14}{15}",
+                "   ".on_black(),
+                "   ".on_red(),
+                "   ".on_green(),
+                "   ".on_yellow(),
+                "   ".on_blue(),
+                "   ".on_magenta(),
+                "   ".on_cyan(),
+                "   ".on_white(),
+                "   ".on_bright_black(),
+                "   ".on_bright_red(),
+                "   ".on_bright_green(),
+                "   ".on_bright_yellow(),
+                "   ".on_bright_blue(),
+                "   ".on_bright_magenta(),
+                "   ".on_bright_cyan(),
+                "   ".on_bright_white(),
+            )?;
+        }
 
         let center_pad = "   ";
         let mut info_lines = buf.lines();
 
         if let Some(custom_image) = &self.custom_image {
-            if let Some(backend) = image_backends::get_best_backend() {
-                writeln!(f, "{}", backend.add_image(info_lines.map(|s| format!("{}{}", center_pad, s)).collect(), custom_image))?;
+            if let Some(image_backend) = &self.image_backend {
+                writeln!(
+                    f,
+                    "{}",
+                    image_backend.add_image(
+                        info_lines.map(|s| format!("{}{}", center_pad, s)).collect(),
+                        custom_image
+                    )
+                )?;
             } else {
                 panic!("No image backend found")
             }
@@ -223,19 +298,28 @@ impl Info {
         colors: Vec<String>,
         disabled: InfoFieldOn,
         bold_flag: bool,
-        custom_image: Option<DynamicImage>
+        custom_image: Option<DynamicImage>,
+        image_backend: Option<Box<dyn ImageBackend>>,
+        no_merges: bool,
+        color_blocks_flag: bool,
+        author_nb: usize,
     ) -> Result<Info> {
-        let authors = Info::get_authors(&dir, 3);
-        let (git_v, git_user) = Info::get_git_info(&dir);
-        let current_commit_info = Info::get_current_commit_info(&dir)?;
-        let config = Info::get_configuration(&dir)?;
-        let version = Info::get_version(&dir)?;
-        let commits = Info::get_commits(&dir)?;
-        let repo_size = Info::get_packed_size(&dir)?;
-        let last_change = Info::get_last_change(&dir)?;
-        let creation_date = Info::get_creation_time(dir)?;
-        let project_license = Info::get_project_license(&dir)?;
-        let (languages_stats, number_of_lines) = Language::get_language_stats(&dir)?;
+        let repo = Repository::discover(&dir).map_err(|_| Error::NotGitRepo)?;
+        let workdir = repo.workdir().ok_or(Error::BareGitRepo)?;
+        let workdir_str = workdir.to_str().unwrap();
+
+        let config = Info::get_configuration(&repo)?;
+        let current_commit_info = Info::get_current_commit_info(&repo)?;
+        let authors = Info::get_authors(workdir_str, no_merges, author_nb);
+        let (git_v, git_user) = Info::get_git_info(workdir_str);
+        let version = Info::get_version(workdir_str)?;
+        let commits = Info::get_commits(workdir_str, no_merges)?;
+        let pending = Info::get_pending_pending(workdir_str)?;
+        let repo_size = Info::get_packed_size(workdir_str)?;
+        let last_change = Info::get_last_change(workdir_str)?;
+        let creation_date = Info::get_creation_time(workdir_str)?;
+        let project_license = Info::get_project_license(workdir_str)?;
+        let (languages_stats, number_of_lines) = Language::get_language_stats(workdir_str)?;
         let dominant_language = Language::get_dominant_language(languages_stats.clone());
 
         Ok(Info {
@@ -244,13 +328,14 @@ impl Info {
             project_name: config.repository_name,
             current_commit: current_commit_info,
             version,
-            creation_date: creation_date,
+            creation_date,
             dominant_language,
             languages: languages_stats,
             authors,
             last_change,
             repo: config.repository_url,
             commits,
+            pending,
             repo_size,
             number_of_lines,
             license: project_license,
@@ -258,99 +343,13 @@ impl Info {
             custom_colors: colors,
             disable_fields: disabled,
             bold_enabled: bold_flag,
+            no_color_blocks: color_blocks_flag,
             custom_image,
+            image_backend,
         })
     }
 
-    // Return first n most active commiters as authors within this project.
-    fn get_authors(dir: &str, n: usize) -> Vec<(String, usize, usize)> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .arg("log")
-            .arg("--format='%aN'")
-            .output()
-            .expect("Failed to execute git.");
-
-        // create map for storing author name as a key and their commit count as value
-        let mut authors = std::collections::HashMap::new();
-        let mut total_commits = 0;
-        let output = String::from_utf8_lossy(&output.stdout);
-        for line in output.lines() {
-            let commit_count = authors.entry(line.to_string()).or_insert(0);
-            *commit_count += 1;
-            total_commits += 1;
-        }
-
-        // sort authors by commit count where the one with most commit count is first
-        let mut authors: Vec<(String, usize)> = authors.into_iter().collect();
-        authors.sort_by_key(|(_, c)| *c);
-        authors.reverse();
-
-        // truncate the vector so we only get the count of authors we specified as 'n'
-        authors.truncate(n);
-
-        // get only authors without their commit count
-        // and string "'" prefix and suffix
-        let authors: Vec<(String, usize, usize)> = authors
-            .into_iter()
-            .map(|(author, count)| {
-                (
-                    author.trim_matches('\'').to_string(),
-                    count,
-                    count * 100 / total_commits,
-                )
-            })
-            .collect();
-
-        authors
-    }
-
-    fn get_git_info(dir: &str) -> (String, String){
-        let version = Command::new("git")
-            .arg("--version")
-            .output()
-            .expect("Failed to execute git.");
-        let version = String::from_utf8_lossy(&version.stdout).replace('\n',"");
-
-        let username = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .arg("config")
-            .arg("--get")
-            .arg("user.name")
-            .output()
-            .expect("Failed to execute git.");
-        let username = String::from_utf8_lossy(&username.stdout).replace('\n',"");
-        (version, username)
-    }
-
-    fn get_current_commit_info(dir: &str) -> Result<CommitInfo> {
-        let repo = Repository::open(dir).map_err(|_| Error::NotGitRepo)?;
-        let head = repo.head().map_err(|_| Error::ReferenceInfoError)?;
-        let head_oid = head.target().ok_or(Error::ReferenceInfoError)?;
-        let refs = repo.references().map_err(|_| Error::ReferenceInfoError)?;
-        let refs_info = refs
-            .into_iter()
-            .filter_map(|reference| match reference {
-                Ok(reference) => match (reference.target(), reference.shorthand()) {
-                    (Some(oid), Some(shorthand)) if oid == head_oid => {
-                        Some(if reference.is_tag() {
-                            String::from("tags/") + shorthand
-                        } else {
-                            String::from(shorthand)
-                        })
-                    }
-                    _ => None,
-                },
-                Err(_) => None,
-            })
-            .collect::<Vec<String>>();
-        Ok(CommitInfo::new(head_oid, refs_info))
-    }
-
-    fn get_configuration(dir: &str) -> Result<Configuration> {
-        let repo = Repository::open(dir).map_err(|_| Error::NotGitRepo)?;
+    fn get_configuration(repo: &Repository) -> Result<Configuration> {
         let config = repo.config().map_err(|_| Error::NoGitData)?;
         let mut remote_url = String::new();
         let mut repository_name = String::new();
@@ -388,6 +387,93 @@ impl Info {
         })
     }
 
+    fn get_current_commit_info(repo: &Repository) -> Result<CommitInfo> {
+        let head = repo.head().map_err(|_| Error::ReferenceInfoError)?;
+        let head_oid = head.target().ok_or(Error::ReferenceInfoError)?;
+        let refs = repo.references().map_err(|_| Error::ReferenceInfoError)?;
+        let refs_info = refs
+            .filter_map(|reference| match reference {
+                Ok(reference) => match (reference.target(), reference.shorthand()) {
+                    (Some(oid), Some(shorthand)) if oid == head_oid => {
+                        Some(if reference.is_tag() {
+                            String::from("tags/") + shorthand
+                        } else {
+                            String::from(shorthand)
+                        })
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            })
+            .collect::<Vec<String>>();
+        Ok(CommitInfo::new(head_oid, refs_info))
+    }
+
+    // Return first n most active commiters as authors within this project.
+    fn get_authors(dir: &str, no_merges: bool, n: usize) -> Vec<(String, usize, usize)> {
+        let mut args = vec!["-C", dir, "log", "--format='%aN'"];
+        if no_merges {
+            args.push("--no-merges");
+        }
+
+        let output = Command::new("git")
+            .args(args)
+            .output()
+            .expect("Failed to execute git.");
+
+        // create map for storing author name as a key and their commit count as value
+        let mut authors = std::collections::HashMap::new();
+        let mut total_commits = 0;
+        let output = String::from_utf8_lossy(&output.stdout);
+        for line in output.lines() {
+            let commit_count = authors.entry(line.to_string()).or_insert(0);
+            *commit_count += 1;
+            total_commits += 1;
+        }
+
+        // sort authors by commit count where the one with most commit count is first
+        let mut authors: Vec<(String, usize)> = authors.into_iter().collect();
+        authors.sort_by_key(|(_, c)| *c);
+        authors.reverse();
+
+        // truncate the vector so we only get the count of authors we specified as 'n'
+        authors.truncate(n);
+
+        // get only authors without their commit count
+        // and string "'" prefix and suffix
+        let authors: Vec<(String, usize, usize)> = authors
+            .into_iter()
+            .map(|(author, count)| {
+                (
+                    author.trim_matches('\'').to_string(),
+                    count,
+                    count * 100 / total_commits,
+                )
+            })
+            .collect();
+
+        authors
+    }
+
+    fn get_git_info(dir: &str) -> (String, String) {
+        let version = Command::new("git")
+            .arg("--version")
+            .output()
+            .expect("Failed to execute git.");
+        let version = String::from_utf8_lossy(&version.stdout).replace('\n', "");
+
+        let username = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("config")
+            .arg("--get")
+            .arg("user.name")
+            .output()
+            .expect("Failed to execute git.");
+        let username = String::from_utf8_lossy(&username.stdout).replace('\n', "");
+        (version, username)
+    }
+
     fn get_version(dir: &str) -> Result<String> {
         let output = Command::new("git")
             .arg("-C")
@@ -407,13 +493,15 @@ impl Info {
         }
     }
 
-    fn get_commits(dir: &str) -> Result<String> {
+    fn get_commits(dir: &str, no_merges: bool) -> Result<String> {
+        let mut args = vec!["-C", dir, "rev-list", "--count"];
+        if no_merges {
+            args.push("--no-merges");
+        }
+        args.push("HEAD");
+
         let output = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .arg("rev-list")
-            .arg("--count")
-            .arg("HEAD")
+            .args(args)
             .output()
             .expect("Failed to execute git.");
 
@@ -423,6 +511,54 @@ impl Info {
             Ok("0".into())
         } else {
             Ok(output.to_string().replace('\n', ""))
+        }
+    }
+
+    fn get_pending_pending(dir: &str) -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("status")
+            .arg("--porcelain")
+            .output()
+            .expect("Failed to execute git.");
+
+        let output = String::from_utf8_lossy(&output.stdout);
+
+        if output == "" {
+            Ok("".into())
+        } else {
+            let lines = output.lines();
+
+            let mut deleted = 0;
+            let mut added = 0;
+            let mut modified = 0;
+
+            for line in lines {
+                let prefix = &line[..2];
+
+                match prefix.trim() {
+                    "D" => deleted += 1,
+                    "A" | "AM" | "??" => added += 1,
+                    "M" | "MM" | "R" => modified += 1,
+                    _ => {}
+                }
+            }
+
+            let mut result = String::from("");
+            if modified > 0 {
+                result = format!("{}+-", modified)
+            }
+
+            if added > 0 {
+                result = format!("{} {}+", result, added);
+            }
+
+            if deleted > 0 {
+                result = format!("{} {}-", result, deleted);
+            }
+
+            Ok(result.trim().into())
         }
     }
 
@@ -438,7 +574,7 @@ impl Info {
         let output = String::from_utf8_lossy(&output.stdout);
         let lines = output.to_string();
         let size_line = lines
-            .split("\n")
+            .split('\n')
             .find(|line| line.starts_with("size-pack:"));
 
         let repo_size = match size_line {
@@ -459,14 +595,14 @@ impl Info {
             let output = String::from_utf8_lossy(&output.stdout);
 
             let lines = output.to_string();
-            let files_list = lines.split("\n");
+            let files_list = lines.split('\n');
             let mut files_count: u128 = 0;
             for _file in files_list {
                 files_count += 1;
             }
             files_count -= 1; // As splitting giving one line extra(blank).
-            let res = repo_size.to_owned() + &(" (") + &(files_count.to_string()) + &(" files)");
-            Ok(res.into())
+            let res = repo_size.to_owned() + (" (") + &(files_count.to_string()) + (" files)");
+            Ok(res)
         } else {
             let res = repo_size;
             Ok(res.into())
@@ -513,28 +649,31 @@ impl Info {
     }
 
     fn get_project_license(dir: &str) -> Result<String> {
-        let output = fs::read_dir(dir)
+        let detector = Detector::new()?;
+
+        let mut output = fs::read_dir(dir)
             .map_err(|_| Error::ReadDirectory)?
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .filter(
                 |entry| {
                     entry.is_file()
-                        && !(entry
+                        && entry
                             .file_name()
                             .map(OsStr::to_string_lossy)
                             .iter()
-                            .filter(|x| x.starts_with("LICENSE") || x.starts_with("COPYING"))
-                            .collect::<Vec<_>>()
-                            .is_empty())
+                            .any(|x| x.starts_with("LICENSE") || x.starts_with("COPYING"))
                 }, // TODO: multiple prefixes, like COPYING?
             )
             .filter_map(|entry| {
-                license::from_text_ext(&fs::read_to_string(entry).unwrap_or_else(|_| "".into()))
+                let contents = fs::read_to_string(entry).unwrap_or_default();
+                detector.analyze(&contents)
             })
-            .map(|license| license.name().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+
+        output.sort();
+        output.dedup();
+        let output = output.join(", ");
 
         if output == "" {
             Ok("??".into())

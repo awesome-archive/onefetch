@@ -1,11 +1,9 @@
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use libc::{
-    ioctl, tcgetattr, tcsetattr, termios, winsize, ECHO, ICANON, STDIN_FILENO, STDOUT_FILENO,
-    TCSANOW, TIOCGWINSZ,
+    c_void, ioctl, poll, pollfd, read, tcgetattr, tcsetattr, termios, winsize, ECHO, ICANON,
+    POLLIN, STDIN_FILENO, STDOUT_FILENO, TCSANOW, TIOCGWINSZ,
 };
-use std::io::Read;
-use std::sync::mpsc::{self, TryRecvError};
-use std::time::Duration;
+use std::time::Instant;
 
 pub struct KittyBackend {}
 
@@ -20,7 +18,7 @@ impl KittyBackend {
             let mut old_attributes: termios = std::mem::zeroed();
             tcgetattr(STDIN_FILENO, &mut old_attributes);
 
-            let mut new_attributes = old_attributes.clone();
+            let mut new_attributes = old_attributes;
             new_attributes.c_lflag &= !ICANON;
             new_attributes.c_lflag &= !ECHO;
             tcsetattr(STDIN_FILENO, TCSANOW, &new_attributes);
@@ -41,40 +39,37 @@ impl KittyBackend {
             base64::encode(&test_image)
         );
 
-        // a new thread is required to avoid blocking the main thread if the terminal doesn't respond
-        let (sender, receiver) = mpsc::channel::<()>();
-        let (stop_sender, stop_receiver) = mpsc::channel::<()>();
-        std::thread::spawn(move || {
-            let mut buf = Vec::<u8>::new();
-            let allowed_bytes = [0x1B, '_' as u8, 'G' as u8, '\\' as u8];
-            for byte in std::io::stdin().lock().bytes() {
-                let byte = byte.unwrap();
-                if allowed_bytes.contains(&byte) {
-                    buf.push(byte);
-                }
-                if buf.starts_with(&[0x1B, '_' as u8, 'G' as u8])
-                    && buf.ends_with(&[0x1B, '\\' as u8])
-                {
-                    sender.send(()).unwrap();
-                    return;
-                }
-                match stop_receiver.try_recv() {
-                    Err(TryRecvError::Empty) => {}
-                    _ => return,
+        let start_time = Instant::now();
+        let mut stdin_pollfd = pollfd {
+            fd: STDIN_FILENO,
+            events: POLLIN,
+            revents: 0,
+        };
+        let allowed_bytes = [0x1B, b'_', b'G', b'\\'];
+        let mut buf = Vec::<u8>::new();
+        loop {
+            // check for timeout while polling to avoid blocking the main thread
+            while unsafe { poll(&mut stdin_pollfd, 1, 0) < 1 } {
+                if start_time.elapsed().as_millis() > 50 {
+                    unsafe {
+                        tcsetattr(STDIN_FILENO, TCSANOW, &old_attributes);
+                    }
+                    return false;
                 }
             }
-        });
-        if let Ok(_) = receiver.recv_timeout(Duration::from_millis(50)) {
+            let mut byte = 0;
             unsafe {
-                tcsetattr(STDIN_FILENO, TCSANOW, &old_attributes);
+                read(STDIN_FILENO, &mut byte as *mut _ as *mut c_void, 1);
             }
-            true
-        } else {
-            unsafe {
-                tcsetattr(STDIN_FILENO, TCSANOW, &old_attributes);
+            if allowed_bytes.contains(&byte) {
+                buf.push(byte);
             }
-            stop_sender.send(()).ok();
-            false
+            if buf.starts_with(&[0x1B, b'_', b'G']) && buf.ends_with(&[0x1B, b'\\']) {
+                unsafe {
+                    tcsetattr(STDIN_FILENO, TCSANOW, &old_attributes);
+                }
+                return true;
+            }
         }
     }
 }
@@ -86,8 +81,8 @@ impl super::ImageBackend for KittyBackend {
             ioctl(STDOUT_FILENO, TIOCGWINSZ, &tty_size);
             tty_size
         };
-        let width_ratio = tty_size.ws_col as f64 / tty_size.ws_xpixel as f64;
-        let height_ratio = tty_size.ws_row as f64 / tty_size.ws_ypixel as f64;
+        let width_ratio = f64::from(tty_size.ws_col) / f64::from(tty_size.ws_xpixel);
+        let height_ratio = f64::from(tty_size.ws_row) / f64::from(tty_size.ws_ypixel);
 
         // resize image to fit the text height with the Lanczos3 algorithm
         let image = image.resize(
@@ -95,8 +90,8 @@ impl super::ImageBackend for KittyBackend {
             (lines.len() as f64 / height_ratio) as u32,
             FilterType::Lanczos3,
         );
-        let _image_columns = width_ratio * image.width() as f64;
-        let image_rows = height_ratio * image.height() as f64;
+        let _image_columns = width_ratio * f64::from(image.width());
+        let image_rows = height_ratio * f64::from(image.height());
 
         // convert the image to rgba samples
         let rgba_image = image.to_rgba();
@@ -108,7 +103,7 @@ impl super::ImageBackend for KittyBackend {
             image.width() as usize * image.height() as usize * 4,
             raw_image.len()
         );
-        
+
         let encoded_image = base64::encode(&raw_image); // image data is base64 encoded
         let mut image_data = Vec::<u8>::new();
         for chunk in encoded_image.as_bytes().chunks(4096) {
